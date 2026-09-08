@@ -1,4 +1,5 @@
 use crate::modules::xlsx::loader::{query_to_table, ExcelCatalog};
+use arboard::Clipboard;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -12,6 +13,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::io;
 use std::time::Duration;
 
@@ -28,6 +30,7 @@ pub struct XlsxTuiApp {
     sheet_entries: Vec<SheetEntry>,
     selected_sheet_idx: usize,
     selected_row_idx: usize,
+    multi_selected_rows: HashSet<usize>,
     current_columns: Vec<String>,
     current_rows: Vec<Vec<String>>,
     status_msg: String,
@@ -55,9 +58,10 @@ impl XlsxTuiApp {
             sheet_entries,
             selected_sheet_idx: 0,
             selected_row_idx: 0,
+            multi_selected_rows: HashSet::new(),
             current_columns: Vec::new(),
             current_rows: Vec::new(),
-            status_msg: "Ready. Press '/' for SQL query, 'Tab' to switch panels, 'q' to quit.".to_string(),
+            status_msg: "Ready. [Space] Select  [y] Yank  [/] SQL Query  [Tab] Switch".to_string(),
             query_input: String::new(),
             in_query_mode: false,
         };
@@ -77,6 +81,7 @@ impl XlsxTuiApp {
                     self.current_columns = sheet.columns.clone();
                     self.current_rows = sheet.rows.clone();
                     self.selected_row_idx = 0;
+                    self.multi_selected_rows.clear();
                     if self.catalog.workbooks.len() > 1 {
                         self.status_msg = format!("Schema: '{}' | Sheet: '{}' ({} rows, {} cols)", entry.schema_name, entry.sheet_name, sheet.rows.len(), sheet.columns.len());
                     } else {
@@ -103,12 +108,82 @@ impl XlsxTuiApp {
                     let count = rows.len();
                     self.current_rows = rows;
                     self.selected_row_idx = 0;
+                    self.multi_selected_rows.clear();
                     self.status_msg = format!("Query OK: {} rows returned", count);
                 }
                 Err(err) => {
                     self.status_msg = format!("SQL Error: {}", err);
                 }
             }
+        }
+    }
+
+    fn yank_selection_to_clipboard(&mut self) {
+        if self.current_rows.is_empty() {
+            self.status_msg = "No rows to yank".to_string();
+            return;
+        }
+
+        let rows_to_yank: Vec<usize> = if !self.multi_selected_rows.is_empty() {
+            let mut indices: Vec<usize> = self.multi_selected_rows.iter().cloned().collect();
+            indices.sort();
+            indices
+        } else {
+            vec![self.selected_row_idx]
+        };
+
+        let mut lines = Vec::new();
+        // Header
+        if !self.current_columns.is_empty() {
+            lines.push(self.current_columns.join("\t"));
+        }
+
+        for &idx in &rows_to_yank {
+            if let Some(row) = self.current_rows.get(idx) {
+                lines.push(row.join("\t"));
+            }
+        }
+
+        let tsv_data = lines.join("\n");
+        let count = rows_to_yank.len();
+
+        match Clipboard::new().and_then(|mut cb| cb.set_text(tsv_data)) {
+            Ok(_) => {
+                self.status_msg = format!("✔ Yanked {} row(s) to clipboard (TSV format)", count);
+            }
+            Err(e) => {
+                self.status_msg = format!("Clipboard error: {}", e);
+            }
+        }
+    }
+
+    fn toggle_row_selection(&mut self) {
+        if self.current_rows.is_empty() {
+            return;
+        }
+        if self.multi_selected_rows.contains(&self.selected_row_idx) {
+            self.multi_selected_rows.remove(&self.selected_row_idx);
+        } else {
+            self.multi_selected_rows.insert(self.selected_row_idx);
+        }
+        let sel_count = self.multi_selected_rows.len();
+        if sel_count > 0 {
+            self.status_msg = format!("{} row(s) highlighted. Press 'y' to yank.", sel_count);
+        } else {
+            self.status_msg = "Selection cleared".to_string();
+        }
+    }
+
+    fn toggle_select_all(&mut self) {
+        if self.current_rows.is_empty() {
+            return;
+        }
+        if self.multi_selected_rows.len() == self.current_rows.len() {
+            self.multi_selected_rows.clear();
+            self.status_msg = "Cleared all selections".to_string();
+        } else {
+            self.multi_selected_rows = (0..self.current_rows.len()).collect();
+            self.status_msg = format!("Selected all {} rows. Press 'y' to yank.", self.current_rows.len());
         }
     }
 }
@@ -164,6 +239,25 @@ pub fn run_xlsx_tui(catalog: ExcelCatalog) -> Result<(), Box<dyn std::error::Err
                                         app.query_input = format!("SELECT * FROM \"{}\" LIMIT 50", entry.sheet_name);
                                     }
                                 }
+                            }
+                        }
+                        KeyCode::Char(' ') => {
+                            if !focus_sidebar {
+                                app.toggle_row_selection();
+                            }
+                        }
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            app.yank_selection_to_clipboard();
+                        }
+                        KeyCode::Char('a') => {
+                            if !focus_sidebar {
+                                app.toggle_select_all();
+                            }
+                        }
+                        KeyCode::Char('c') => {
+                            if !focus_sidebar {
+                                app.multi_selected_rows.clear();
+                                app.status_msg = "Cleared selection".to_string();
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
@@ -284,9 +378,12 @@ fn ui(f: &mut Frame, app: &XlsxTuiApp, focus_sidebar: bool) {
 
     // Main Table
     let table_border_color = if !focus_sidebar { Color::Green } else { Color::DarkGray };
-    let header_cells = app.current_columns.iter().map(|h| {
+    
+    // Prefix header with selection column indicator
+    let mut header_cells = vec![Cell::from("SEL").style(Style::default().fg(Color::DarkGray))];
+    header_cells.extend(app.current_columns.iter().map(|h| {
         Cell::from(h.as_str()).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-    });
+    }));
     let header_row = Row::new(header_cells).height(1).bottom_margin(1);
 
     let rows: Vec<Row> = app
@@ -294,22 +391,44 @@ fn ui(f: &mut Frame, app: &XlsxTuiApp, focus_sidebar: bool) {
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            let cells = row.iter().map(|c| Cell::from(c.as_str()));
+            let is_multi_selected = app.multi_selected_rows.contains(&i);
+            let is_cursor = i == app.selected_row_idx && !focus_sidebar;
+
+            let sel_icon = if is_multi_selected { " ✔ " } else { "   " };
+            let mut cells = vec![Cell::from(sel_icon).style(if is_multi_selected {
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            })];
+
+            cells.extend(row.iter().map(|c| Cell::from(c.as_str())));
             let mut r = Row::new(cells);
-            if i == app.selected_row_idx && !focus_sidebar {
+
+            if is_cursor && is_multi_selected {
+                r = r.style(Style::default().bg(Color::Rgb(40, 90, 70)).fg(Color::White).add_modifier(Modifier::BOLD));
+            } else if is_cursor {
                 r = r.style(Style::default().bg(Color::Rgb(30, 60, 90)).fg(Color::White));
+            } else if is_multi_selected {
+                r = r.style(Style::default().bg(Color::Rgb(20, 60, 40)).fg(Color::Green));
             }
+
             r
         })
         .collect();
 
-    let widths: Vec<Constraint> = if app.current_columns.is_empty() {
-        vec![Constraint::Percentage(100)]
+    let mut widths: Vec<Constraint> = vec![Constraint::Length(4)];
+    if app.current_columns.is_empty() {
+        widths.push(Constraint::Percentage(100));
     } else {
-        vec![Constraint::Max(25); app.current_columns.len()]
-    };
+        widths.extend(vec![Constraint::Max(25); app.current_columns.len()]);
+    }
 
-    let table_title = format!(" 📄 Data Grid ({} rows) ", app.current_rows.len());
+    let sel_info = if !app.multi_selected_rows.is_empty() {
+        format!(" ({} selected)", app.multi_selected_rows.len())
+    } else {
+        String::new()
+    };
+    let table_title = format!(" 📄 Data Grid ({} rows){} ", app.current_rows.len(), sel_info);
     let table_widget = Table::new(rows, widths)
         .header(header_row)
         .block(
@@ -336,7 +455,7 @@ fn ui(f: &mut Frame, app: &XlsxTuiApp, focus_sidebar: bool) {
             );
         f.render_widget(query_bar, chunks[2]);
     } else {
-        let footer_text = format!(" {} | [Tab] Switch Pane  [/] SQL Query  [↑/↓] Navigate  [q] Quit", app.status_msg);
+        let footer_text = format!(" {} | [Space] Select  [y] Yank  [a] All  [Tab] Switch  [/] SQL  [q] Quit", app.status_msg);
         let footer = Paragraph::new(footer_text)
             .style(Style::default().fg(Color::Gray))
             .block(Block::default().borders(Borders::ALL));

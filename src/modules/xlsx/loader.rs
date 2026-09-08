@@ -50,6 +50,17 @@ impl ExcelWorkbook {
             .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
             .collect();
 
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+
+        if ext == "csv" || ext == "tsv" || ext == "txt" {
+            let delimiter = if ext == "tsv" { b'\t' } else { b',' };
+            return Self::load_from_csv(&path, &schema_name, delimiter);
+        }
+
         let mut workbook = open_workbook_auto(&path).map_err(|e| format!("Failed to open spreadsheet '{}': {}", path.display(), e))?;
         let sheet_names = workbook.sheet_names().to_vec();
 
@@ -116,6 +127,61 @@ impl ExcelWorkbook {
             sheet_names,
         })
     }
+
+    fn load_from_csv(path: &Path, schema_name: &str, delimiter: u8) -> Result<Self, String> {
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .flexible(true)
+            .delimiter(delimiter)
+            .from_path(path)
+            .map_err(|e| format!("Failed to read CSV '{}': {}", path.display(), e))?;
+
+        let headers = reader.headers().map_err(|e| format!("CSV headers error in '{}': {}", path.display(), e))?;
+        let columns: Vec<String> = headers
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                let s = h.trim();
+                if s.is_empty() {
+                    format!("col_{}", i + 1)
+                } else {
+                    s.to_string()
+                }
+            })
+            .collect();
+
+        let mut data_rows = Vec::new();
+        for result in reader.records() {
+            let record = result.map_err(|e| format!("CSV row error in '{}': {}", path.display(), e))?;
+            let mut row_vec = Vec::new();
+            for field in record.iter() {
+                row_vec.push(field.to_string());
+            }
+            while row_vec.len() < columns.len() {
+                row_vec.push(String::new());
+            }
+            data_rows.push(row_vec);
+        }
+
+        let sheet_name = schema_name.to_string();
+        let mut sheets = HashMap::new();
+        sheets.insert(
+            sheet_name.clone(),
+            SheetData {
+                name: sheet_name.clone(),
+                schema_name: schema_name.to_string(),
+                columns,
+                rows: data_rows,
+            },
+        );
+
+        Ok(ExcelWorkbook {
+            path: path.to_path_buf(),
+            schema_name: schema_name.to_string(),
+            sheets,
+            sheet_names: vec![sheet_name],
+        })
+    }
 }
 
 impl ExcelCatalog {
@@ -132,7 +198,7 @@ impl ExcelCatalog {
             for entry in fs::read_dir(&path).map_err(|e| e.to_string())?.flatten() {
                 let p = entry.path();
                 if let Some(ext) = p.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()) {
-                    if matches!(ext.as_str(), "xlsx" | "xls" | "ods" | "xlsb" | "csv") {
+                    if matches!(ext.as_str(), "xlsx" | "xls" | "ods" | "xlsb" | "csv" | "tsv") {
                         entries.push(p);
                     }
                 }
@@ -140,7 +206,7 @@ impl ExcelCatalog {
             entries.sort();
 
             if entries.is_empty() {
-                return Err(format!("No Excel or spreadsheet files found in directory '{}'", path.display()));
+                return Err(format!("No spreadsheet or CSV files found in directory '{}'", path.display()));
             }
 
             for file in entries {
@@ -151,7 +217,7 @@ impl ExcelCatalog {
             }
 
             if workbooks.is_empty() {
-                return Err(format!("Could not load any valid spreadsheets from '{}'", path.display()));
+                return Err(format!("Could not load any valid spreadsheets or CSV files from '{}'", path.display()));
             }
 
             Ok(ExcelCatalog {
@@ -173,7 +239,6 @@ impl ExcelCatalog {
 
     pub fn create_in_memory_sqlite(&self) -> Result<Connection, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
-
         let is_multi = self.workbooks.len() > 1;
 
         for wb in &self.workbooks {
@@ -196,7 +261,7 @@ impl ExcelCatalog {
 
                 let sanitized_sheet_name = sheet.name.replace('"', "\"\"");
 
-                // 1. Target table in attached schema
+                // 1. Target table in attached schema (or main)
                 let target_table = if is_multi {
                     format!("\"{}\".\"{}\"", wb.schema_name, sanitized_sheet_name)
                 } else {
@@ -226,10 +291,20 @@ impl ExcelCatalog {
                     let view_sql = format!("CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM {};", alias_name, target_table);
                     let _ = conn.execute(&view_sql, []);
 
+                    // Create view `<schema>` directly if schema == sheet_name (e.g. CSV files)
+                    if wb.schema_name == sanitized_sheet_name {
+                        let direct_view = format!("CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM {};", wb.schema_name, target_table);
+                        let _ = conn.execute(&direct_view, []);
+                    }
+
                     // Create view `"<schema>.<sheet>"` in main schema for dot syntax fallback
                     let dot_alias = format!("{}.{}", wb.schema_name, sanitized_sheet_name);
                     let dot_view_sql = format!("CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM {};", dot_alias, target_table);
                     let _ = conn.execute(&dot_view_sql, []);
+                } else {
+                    // Single file mode: also alias 'data' for quick generic queries
+                    let data_view = format!("CREATE VIEW IF NOT EXISTS \"data\" AS SELECT * FROM {};", target_table);
+                    let _ = conn.execute(&data_view, []);
                 }
             }
         }
@@ -255,7 +330,11 @@ impl ExcelCatalog {
 
                 let sanitized_sheet_name = sheet.name.replace('"', "\"\"");
                 let table_name = if is_multi {
-                    format!("{}_{}", wb.schema_name, sanitized_sheet_name)
+                    if wb.schema_name == sanitized_sheet_name {
+                        wb.schema_name.clone()
+                    } else {
+                        format!("{}_{}", wb.schema_name, sanitized_sheet_name)
+                    }
                 } else {
                     sanitized_sheet_name
                 };

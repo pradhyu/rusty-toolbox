@@ -1,0 +1,6 @@
+id,first_name,last_name,department,salary,active
+101,John,Doe,Engineering,135000,true
+102,Jane,Smith,Engineering,142000,true
+103,Bob,Johnson,Product,125000,true
+104,Alice,Williams,Design,118000,false
+105,Charlie,Brown,Marketing,95000,true

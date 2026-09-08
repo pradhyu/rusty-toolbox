@@ -1,0 +1,4 @@
+PartnerCode,PartnerName,SupportedRegions,AvgDeliveryDays
+SHIP-FEDEX,FedEx Express,North America|Europe,2
+SHIP-DHL,DHL Global,Europe|Asia-Pacific,3
+SHIP-UPS,UPS Worldwide,North America|Latin America,2

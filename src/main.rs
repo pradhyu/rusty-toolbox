@@ -32,8 +32,8 @@ enum Commands {
         dump_sqlite: Option<PathBuf>,
     },
 
-    /// Excel / Spreadsheet (.xlsx, .xls, .ods) SQL Query Runner & Inspector
-    #[command(alias = "excel", alias = "sheet")]
+    /// Excel / Spreadsheet (.xlsx, .xls, .ods, .csv, .tsv) SQL Query Runner & Inspector
+    #[command(alias = "excel", alias = "sheet", alias = "csv", alias = "tsv")]
     Xlsx {
         /// Path to .xlsx, .xls, .ods, or .csv spreadsheet file
         #[arg(value_name = "PATH")]

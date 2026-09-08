@@ -8,33 +8,38 @@ Runs anywhere: **macOS**, **Linux**, and **Windows**.
 
 ## ⚡ Key Highlights
 
-### 1. `rtb xlsx` / `rtb excel` — Multi-Workbook Folder Catalogs & Cross-File SQL Joins
-Query, filter, and inspect `.xlsx`, `.xls`, `.ods`, `.xlsb`, and `.csv` spreadsheets directly in your terminal using standard SQL with zero Microsoft Office, Python, or JVM dependencies.
+### 1. `rtb xlsx` / `rtb csv` — Multi-Workbook Catalogs, CSVs & Cross-File SQL Joins
+Query, filter, and inspect `.xlsx`, `.xls`, `.ods`, `.xlsb`, `.csv`, and `.tsv` files directly in your terminal using standard SQL with zero Microsoft Office, Python, or JVM dependencies.
 
-- **Folder / Multi-File Catalog**: Pass an entire directory containing multiple Excel spreadsheets. Each spreadsheet file becomes a **Schema namespace** (e.g. `sales.xlsx` -> `sales.Orders`, `inventory.xlsx` -> `inventory.Products`).
-- **Cross-File SQL Joins**: Seamlessly `JOIN` worksheets across different Excel files in one query.
-- **Dual Mode**:
-  - **Scriptable CLI / ASCII Tables**: Run SQL queries with aggregate functions (`SUM`, `COUNT`, `AVG`), `GROUP BY`, and `JOIN`s.
-  - **Interactive TUI**: Dual-pane Ratatui browser with a schema & sheet tree sidebar, scrollable data grid, and interactive SQL query prompt (`/`).
-- **SQLite Export**: Instant export of entire multi-workbook directories or individual workbooks to `.sqlite` databases (`--dump-sqlite`).
+- **CSV & Excel Single Files or Directories**:
+  - Single CSV: `rtb csv employees.csv "SELECT * FROM data WHERE active = 'true'"`
+  - Single Excel: `rtb xlsx sales.xlsx "SELECT * FROM Orders"`
+  - Folder Catalog: `rtb xlsx ./data_folder/`
+- **Cross-File SQL Joins**: `JOIN` tables across `.xlsx`, `.xls`, and `.csv` files in a single SQL query.
+- **Interactive TUI with Row Yanking & Multi-Highlight**:
+  - `Space`: Toggle multi-selection on rows.
+  - `y` / `Y`: Yank selected rows (or active row) directly into system clipboard in clean TSV format (ready to paste into Excel, Google Sheets, or Neovim).
+  - `a`: Select/deselect all rows.
+  - `c`: Clear selection.
+  - `/`: Live interactive SQL query prompt.
+- **SQLite Export**: Instant export of entire multi-workbook directories, spreadsheets, or CSVs to standalone `.sqlite` databases (`--dump-sqlite`).
 
 #### Example Usage:
 
 ```bash
-# 1. Open Interactive TUI for a single file or entire folder
-rtb xlsx ./sales_report.xlsx
-rtb xlsx ./financial_data_folder/
+# 1. Single CSV Query
+rtb csv examples/employees.csv "SELECT first_name, last_name, salary FROM employees WHERE active = 'true'"
 
-# 2. Cross-File SQL JOIN across separate Excel files
-rtb xlsx ./examples/sample_catalog/ "SELECT o.OrderID, c.Name as Customer, p.ProductName, w.Location as Warehouse, o.TotalAmount
+# 2. Open Interactive TUI for a single file or entire folder
+rtb xlsx ./financial_data_folder/
+rtb csv ./employees.csv
+
+# 3. Cross-File SQL JOIN across separate Excel and CSV files in a folder
+rtb xlsx ./examples/sample_catalog/ "SELECT o.OrderID, c.Name as Customer, p.ProductName, s.PartnerName as Carrier
 FROM sales.Orders o
 JOIN sales.Customers c ON o.CustomerID = c.CustomerID
 JOIN inventory.Products p ON o.ProductSKU = p.ProductSKU
-JOIN inventory.Warehouses w ON p.WarehouseCode = w.WarehouseCode"
-
-# 3. Aggregations & Grouping
-rtb xlsx ./examples/sample_sales.xlsx "SELECT Region, COUNT(o.OrderID) as Orders, SUM(CAST(o.TotalAmount AS REAL)) as Revenue \
-  FROM Orders o JOIN Customers c ON o.CustomerID = c.CustomerID GROUP BY Region"
+JOIN shipping_partners s ON s.PartnerCode = 'SHIP-FEDEX'"
 
 # 4. Export Multi-Workbook Folder to SQLite
 rtb xlsx ./financial_data_folder/ --dump-sqlite company_data.db
@@ -47,7 +52,7 @@ Inspect and query HyperSQL (HSQLDB) database catalogs, files, and schemas withou
 
 - **Zero JVM Dependency**: Pure Rust parser for HSQLDB `.properties` and `.script` (DDL & memory rows).
 - **Flexible Path Input**: Pass a directory containing database files or a direct path to a `.script`/`.properties` file.
-- **Interactive TUI**: Table browser with live SQL query runner (`/`).
+- **Interactive TUI**: Table browser with live SQL query runner (`/`), multi-row highlight (`Space`), and clipboard yank (`y`).
 
 #### Example Usage:
 ```bash
@@ -64,12 +69,16 @@ rtb hsql ./data/sample_hsqldb/ --dump-sqlite exported_hsql.db
 
 ---
 
-## ⌨️ TUI Keybindings (for both `rtb xlsx` & `rtb hsql`)
+## ⌨️ TUI Keybindings (for `rtb xlsx`, `rtb csv`, and `rtb hsql`)
 | Key | Action |
 |---|---|
 | `Tab` / `BackTab` | Switch focus between **Sidebar** and **Data Table** |
 | `↑` / `↓` (`k` / `j`) | Navigate rows / schemas / sheets / tables |
 | `PgUp` / `PgDn` | Fast scroll (15 rows) |
+| `Space` | **Toggle Multi-Row Selection / Highlight** |
+| `y` / `Y` | **Yank (Copy) Selected Row(s) to System Clipboard (TSV format)** |
+| `a` | Select / Deselect All Rows |
+| `c` | Clear Row Selection |
 | `/` | Open custom interactive SQL query prompt |
 | `Enter` | Execute SQL query |
 | `Esc` | Cancel SQL query prompt / Restore full table view |
@@ -91,7 +100,7 @@ cargo install --path .
 ## 📋 Full Planned Toolset Overview (`rtb`)
 
 See [`SPEC.md`](SPEC.md) for the complete specification of all tools:
-1. `rtb xlsx` — Multi-workbook Excel catalog & cross-file SQL query engine
+1. `rtb xlsx` / `rtb csv` — Multi-workbook Excel & CSV catalog with cross-file SQL and TUI clipboard yank
 2. `rtb hsql` — HyperSQL native inspector & SQLite converter
 3. `rtb jwt` — Offline JWT decoder & visualizer
 4. `rtb time` — Epoch & multi-timezone converter
