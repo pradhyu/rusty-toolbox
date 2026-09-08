@@ -87,25 +87,41 @@ fn render_ascii_table(columns: &[String], rows: &[Vec<String>]) {
 }
 
 pub fn clean_sql_query(query: &str) -> String {
-    // 1. Remove line continuation backslashes (\ followed by whitespace or newline)
-    let without_escapes = query.replace("\\\n", " ").replace("\\\r\n", " ");
-    
-    // 2. Normalize whitespace while respecting strings
+    // 1. Normalize line endings (CRLF -> LF)
+    let normalized = query.replace("\r\n", "\n").replace('\r', "\n");
+
+    // 2. Normalize smart quotes often copied from blogs/word/markdown
+    let normalized = normalized
+        .replace(['‘', '’'], "'")
+        .replace(['“', '”'], "\"");
+
+    // 3. Normalize shell escape characters outside string literals
+    // Handles:
+    // - Bash/Zsh line continuations: \
+    // - PowerShell line continuations: `
+    // - Windows CMD line continuations: ^
     let mut cleaned = String::new();
-    let mut in_quote = false;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
     let mut prev_is_space = false;
 
-    for c in without_escapes.chars() {
-        if c == '\'' {
-            in_quote = !in_quote;
+    for c in normalized.chars() {
+        if c == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
             cleaned.push(c);
             prev_is_space = false;
-        } else if in_quote {
+        } else if c == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
             cleaned.push(c);
-        } else if c == '\\' {
-            // Stray backslash outside quotes from copy-pasting shell commands
-            cleaned.push(' ');
-            prev_is_space = true;
+            prev_is_space = false;
+        } else if in_single_quote || in_double_quote {
+            cleaned.push(c);
+        } else if c == '\\' || c == '`' || c == '^' {
+            // Stray shell line continuation outside of quotes
+            if !prev_is_space {
+                cleaned.push(' ');
+                prev_is_space = true;
+            }
         } else if c.is_whitespace() {
             if !prev_is_space {
                 cleaned.push(' ');
@@ -118,4 +134,33 @@ pub fn clean_sql_query(query: &str) -> String {
     }
 
     cleaned.trim().trim_end_matches(';').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_powershell_multiline_backtick() {
+        let ps_query = "SELECT * `\r\n FROM Orders `\r\n WHERE Amount > 100;";
+        assert_eq!(clean_sql_query(ps_query), "SELECT * FROM Orders WHERE Amount > 100");
+    }
+
+    #[test]
+    fn test_cmd_multiline_caret() {
+        let cmd_query = "SELECT * ^\r\n FROM Orders ^\r\n WHERE Amount > 100;";
+        assert_eq!(clean_sql_query(cmd_query), "SELECT * FROM Orders WHERE Amount > 100");
+    }
+
+    #[test]
+    fn test_bash_multiline_backslash() {
+        let bash_query = "SELECT o.ID, c.Name \\\n FROM Orders o \\\n JOIN Customers c ON o.CustID = c.ID;";
+        assert_eq!(clean_sql_query(bash_query), "SELECT o.ID, c.Name FROM Orders o JOIN Customers c ON o.CustID = c.ID");
+    }
+
+    #[test]
+    fn test_preserves_content_inside_quotes() {
+        let query = "SELECT * FROM Users WHERE Email = 'alice\\test`^@example.com'";
+        assert_eq!(clean_sql_query(query), "SELECT * FROM Users WHERE Email = 'alice\\test`^@example.com'");
+    }
 }
