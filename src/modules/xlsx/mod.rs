@@ -2,7 +2,7 @@ pub mod loader;
 pub mod tui;
 
 use colored::Colorize;
-use loader::{query_to_table, ExcelWorkbook};
+use loader::{query_to_table, ExcelCatalog};
 use std::path::PathBuf;
 
 pub fn execute_xlsx_command(
@@ -11,19 +11,20 @@ pub fn execute_xlsx_command(
     interactive: bool,
     dump_sqlite: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let workbook = ExcelWorkbook::load_from_file(&path).map_err(|e| format!("Failed to load Excel spreadsheet: {}", e))?;
+    let catalog = ExcelCatalog::load_from_path(&path).map_err(|e| format!("Failed to load Excel catalog: {}", e))?;
 
     if let Some(sqlite_out) = dump_sqlite {
-        println!("🔄 Converting Excel '{}' to SQLite '{}'...", path.display(), sqlite_out.display());
-        workbook.export_to_sqlite(&sqlite_out).map_err(|e| format!("Export error: {}", e))?;
-        println!("{} Exported {} sheet(s) to {}", "✔".green(), workbook.sheet_names.len(), sqlite_out.display());
+        let total_sheets: usize = catalog.workbooks.iter().map(|w| w.sheet_names.len()).sum();
+        println!("🔄 Converting Excel catalog '{}' ({} files, {} sheets) to SQLite '{}'...", path.display(), catalog.workbooks.len(), total_sheets, sqlite_out.display());
+        catalog.export_to_sqlite(&sqlite_out).map_err(|e| format!("Export error: {}", e))?;
+        println!("{} Exported {} workbook(s) ({} sheets) to {}", "✔".green(), catalog.workbooks.len(), total_sheets, sqlite_out.display());
         return Ok(());
     }
 
     if let Some(ref q) = query {
         let cleaned_query = clean_sql_query(q);
         println!("{} Executing: {}", "🔍".cyan(), cleaned_query.bright_white().bold());
-        let conn = workbook.create_in_memory_sqlite().map_err(|e| format!("SQLite initialization error: {}", e))?;
+        let conn = catalog.create_in_memory_sqlite().map_err(|e| format!("SQLite initialization error: {}", e))?;
         let (columns, rows) = query_to_table(&conn, &cleaned_query).map_err(|e| format!("Query failed: {}", e))?;
 
         render_ascii_table(&columns, &rows);
@@ -32,7 +33,7 @@ pub fn execute_xlsx_command(
     }
 
     if interactive || query.is_none() {
-        tui::run_xlsx_tui(workbook)?;
+        tui::run_xlsx_tui(catalog)?;
     }
 
     Ok(())

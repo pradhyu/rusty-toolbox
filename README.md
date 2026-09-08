@@ -8,33 +8,36 @@ Runs anywhere: **macOS**, **Linux**, and **Windows**.
 
 ## ⚡ Key Highlights
 
-### 1. `rtb xlsx` / `rtb excel` — Native Excel & Spreadsheet SQL Inspector
-Query, filter, and inspect `.xlsx`, `.xls`, `.ods`, and `.csv` spreadsheets directly in your terminal using standard SQL with zero Microsoft Office, Python, or JVM dependencies.
+### 1. `rtb xlsx` / `rtb excel` — Multi-Workbook Folder Catalogs & Cross-File SQL Joins
+Query, filter, and inspect `.xlsx`, `.xls`, `.ods`, `.xlsb`, and `.csv` spreadsheets directly in your terminal using standard SQL with zero Microsoft Office, Python, or JVM dependencies.
 
-- **Cross-Sheet SQL Joins**: Automatically maps each worksheet into a relational table.
+- **Folder / Multi-File Catalog**: Pass an entire directory containing multiple Excel spreadsheets. Each spreadsheet file becomes a **Schema namespace** (e.g. `sales.xlsx` -> `sales.Orders`, `inventory.xlsx` -> `inventory.Products`).
+- **Cross-File SQL Joins**: Seamlessly `JOIN` worksheets across different Excel files in one query.
 - **Dual Mode**:
   - **Scriptable CLI / ASCII Tables**: Run SQL queries with aggregate functions (`SUM`, `COUNT`, `AVG`), `GROUP BY`, and `JOIN`s.
-  - **Interactive TUI**: Dual-pane Ratatui browser with a sheet selector sidebar, scrollable data grid, and interactive SQL query prompt (`/`).
-- **SQLite Export**: Instant export of entire multi-sheet workbooks to `.sqlite` databases (`--dump-sqlite`).
+  - **Interactive TUI**: Dual-pane Ratatui browser with a schema & sheet tree sidebar, scrollable data grid, and interactive SQL query prompt (`/`).
+- **SQLite Export**: Instant export of entire multi-workbook directories or individual workbooks to `.sqlite` databases (`--dump-sqlite`).
 
 #### Example Usage:
+
 ```bash
-# 1. Interactive TUI Browser
+# 1. Open Interactive TUI for a single file or entire folder
 rtb xlsx ./sales_report.xlsx
-# or alias
-rtb excel ./sales_report.xlsx
+rtb xlsx ./financial_data_folder/
 
-# 2. Run Direct SQL Queries
-rtb xlsx sales.xlsx "SELECT * FROM Customers WHERE Region = 'North America'"
+# 2. Cross-File SQL JOIN across separate Excel files
+rtb xlsx ./examples/sample_catalog/ "SELECT o.OrderID, c.Name as Customer, p.ProductName, w.Location as Warehouse, o.TotalAmount
+FROM sales.Orders o
+JOIN sales.Customers c ON o.CustomerID = c.CustomerID
+JOIN inventory.Products p ON o.ProductSKU = p.ProductSKU
+JOIN inventory.Warehouses w ON p.WarehouseCode = w.WarehouseCode"
 
-# Multi-sheet JOIN
-rtb xlsx sales.xlsx "SELECT o.OrderID, c.Name, o.TotalAmount FROM Orders o JOIN Customers c ON o.CustomerID = c.CustomerID"
+# 3. Aggregations & Grouping
+rtb xlsx ./examples/sample_sales.xlsx "SELECT Region, COUNT(o.OrderID) as Orders, SUM(CAST(o.TotalAmount AS REAL)) as Revenue \
+  FROM Orders o JOIN Customers c ON o.CustomerID = c.CustomerID GROUP BY Region"
 
-# Aggregations & Grouping
-rtb xlsx sales.xlsx "SELECT Region, COUNT(o.OrderID) as Orders, SUM(CAST(o.TotalAmount AS REAL)) as Revenue FROM Orders o JOIN Customers c ON o.CustomerID = c.CustomerID GROUP BY Region"
-
-# 3. Export to SQLite
-rtb xlsx sales.xlsx --dump-sqlite sales.db
+# 4. Export Multi-Workbook Folder to SQLite
+rtb xlsx ./financial_data_folder/ --dump-sqlite company_data.db
 ```
 
 ---
@@ -65,7 +68,7 @@ rtb hsql ./data/sample_hsqldb/ --dump-sqlite exported_hsql.db
 | Key | Action |
 |---|---|
 | `Tab` / `BackTab` | Switch focus between **Sidebar** and **Data Table** |
-| `↑` / `↓` (`k` / `j`) | Navigate rows / sheets / tables |
+| `↑` / `↓` (`k` / `j`) | Navigate rows / schemas / sheets / tables |
 | `PgUp` / `PgDn` | Fast scroll (15 rows) |
 | `/` | Open custom interactive SQL query prompt |
 | `Enter` | Execute SQL query |
@@ -80,12 +83,7 @@ rtb hsql ./data/sample_hsqldb/ --dump-sqlite exported_hsql.db
 git clone https://github.com/pradhyu/rusty-toolbox.git
 cd rusty-toolbox
 cargo build --release
-```
-
-Add an alias to your `~/.zshrc` or `~/.bashrc`:
-```bash
-alias rtb="$HOME/git/rusty-toolbox/target/release/rtb"
-alias tb="$HOME/git/rusty-toolbox/target/release/rtb"
+cargo install --path .
 ```
 
 ---
@@ -93,7 +91,7 @@ alias tb="$HOME/git/rusty-toolbox/target/release/rtb"
 ## 📋 Full Planned Toolset Overview (`rtb`)
 
 See [`SPEC.md`](SPEC.md) for the complete specification of all tools:
-1. `rtb xlsx` — Native Excel/Spreadsheet SQL inspector & SQLite converter
+1. `rtb xlsx` — Multi-workbook Excel catalog & cross-file SQL query engine
 2. `rtb hsql` — HyperSQL native inspector & SQLite converter
 3. `rtb jwt` — Offline JWT decoder & visualizer
 4. `rtb time` — Epoch & multi-timezone converter

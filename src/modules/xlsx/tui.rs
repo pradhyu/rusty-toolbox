@@ -1,4 +1,4 @@
-use crate::modules::xlsx::loader::{query_to_table, ExcelWorkbook};
+use crate::modules::xlsx::loader::{query_to_table, ExcelCatalog};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -15,9 +15,17 @@ use rusqlite::Connection;
 use std::io;
 use std::time::Duration;
 
+#[derive(Clone)]
+struct SheetEntry {
+    wb_idx: usize,
+    schema_name: String,
+    sheet_name: String,
+}
+
 pub struct XlsxTuiApp {
-    workbook: ExcelWorkbook,
+    catalog: ExcelCatalog,
     conn: Option<Connection>,
+    sheet_entries: Vec<SheetEntry>,
     selected_sheet_idx: usize,
     selected_row_idx: usize,
     current_columns: Vec<String>,
@@ -28,10 +36,23 @@ pub struct XlsxTuiApp {
 }
 
 impl XlsxTuiApp {
-    pub fn new(workbook: ExcelWorkbook) -> Self {
+    pub fn new(catalog: ExcelCatalog) -> Self {
+        let mut sheet_entries = Vec::new();
+
+        for (wb_idx, wb) in catalog.workbooks.iter().enumerate() {
+            for sheet_name in &wb.sheet_names {
+                sheet_entries.push(SheetEntry {
+                    wb_idx,
+                    schema_name: wb.schema_name.clone(),
+                    sheet_name: sheet_name.clone(),
+                });
+            }
+        }
+
         let mut app = Self {
-            workbook,
+            catalog,
             conn: None,
+            sheet_entries,
             selected_sheet_idx: 0,
             selected_row_idx: 0,
             current_columns: Vec::new(),
@@ -41,7 +62,7 @@ impl XlsxTuiApp {
             in_query_mode: false,
         };
 
-        if let Ok(conn) = app.workbook.create_in_memory_sqlite() {
+        if let Ok(conn) = app.catalog.create_in_memory_sqlite() {
             app.conn = Some(conn);
         }
 
@@ -50,12 +71,18 @@ impl XlsxTuiApp {
     }
 
     fn load_active_sheet(&mut self) {
-        if let Some(sheet_name) = self.workbook.sheet_names.get(self.selected_sheet_idx) {
-            if let Some(sheet) = self.workbook.sheets.get(sheet_name) {
-                self.current_columns = sheet.columns.clone();
-                self.current_rows = sheet.rows.clone();
-                self.selected_row_idx = 0;
-                self.status_msg = format!("Sheet: '{}' ({} rows, {} cols)", sheet_name, sheet.rows.len(), sheet.columns.len());
+        if let Some(entry) = self.sheet_entries.get(self.selected_sheet_idx) {
+            if let Some(wb) = self.catalog.workbooks.get(entry.wb_idx) {
+                if let Some(sheet) = wb.sheets.get(&entry.sheet_name) {
+                    self.current_columns = sheet.columns.clone();
+                    self.current_rows = sheet.rows.clone();
+                    self.selected_row_idx = 0;
+                    if self.catalog.workbooks.len() > 1 {
+                        self.status_msg = format!("Schema: '{}' | Sheet: '{}' ({} rows, {} cols)", entry.schema_name, entry.sheet_name, sheet.rows.len(), sheet.columns.len());
+                    } else {
+                        self.status_msg = format!("Sheet: '{}' ({} rows, {} cols)", entry.sheet_name, sheet.rows.len(), sheet.columns.len());
+                    }
+                }
             }
         }
     }
@@ -67,8 +94,10 @@ impl XlsxTuiApp {
             return;
         }
 
+        let cleaned_query = crate::modules::xlsx::clean_sql_query(query);
+
         if let Some(ref conn) = self.conn {
-            match query_to_table(conn, query) {
+            match query_to_table(conn, &cleaned_query) {
                 Ok((cols, rows)) => {
                     self.current_columns = cols;
                     let count = rows.len();
@@ -84,14 +113,14 @@ impl XlsxTuiApp {
     }
 }
 
-pub fn run_xlsx_tui(workbook: ExcelWorkbook) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_xlsx_tui(catalog: ExcelCatalog) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = XlsxTuiApp::new(workbook);
+    let mut app = XlsxTuiApp::new(catalog);
     let mut focus_sidebar = true;
 
     loop {
@@ -128,8 +157,12 @@ pub fn run_xlsx_tui(workbook: ExcelWorkbook) -> Result<(), Box<dyn std::error::E
                         KeyCode::Char('/') => {
                             app.in_query_mode = true;
                             if app.query_input.is_empty() {
-                                if let Some(sheet) = app.workbook.sheet_names.get(app.selected_sheet_idx) {
-                                    app.query_input = format!("SELECT * FROM \"{}\" LIMIT 50", sheet);
+                                if let Some(entry) = app.sheet_entries.get(app.selected_sheet_idx) {
+                                    if app.catalog.workbooks.len() > 1 {
+                                        app.query_input = format!("SELECT * FROM {}.\"{}\" LIMIT 50", entry.schema_name, entry.sheet_name);
+                                    } else {
+                                        app.query_input = format!("SELECT * FROM \"{}\" LIMIT 50", entry.sheet_name);
+                                    }
                                 }
                             }
                         }
@@ -145,7 +178,7 @@ pub fn run_xlsx_tui(workbook: ExcelWorkbook) -> Result<(), Box<dyn std::error::E
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
                             if focus_sidebar {
-                                if app.selected_sheet_idx + 1 < app.workbook.sheet_names.len() {
+                                if app.selected_sheet_idx + 1 < app.sheet_entries.len() {
                                     app.selected_sheet_idx += 1;
                                     app.load_active_sheet();
                                 }
@@ -188,8 +221,15 @@ fn ui(f: &mut Frame, app: &XlsxTuiApp, focus_sidebar: bool) {
         .split(f.area());
 
     // 1. Header
-    let filename = app.workbook.path.file_name().and_then(|s| s.to_str()).unwrap_or("Workbook");
-    let header_title = format!(" 📊 Excel & Spreadsheet Inspector (rtb xlsx) — {} ({} sheets) ", filename, app.workbook.sheet_names.len());
+    let filename = app.catalog.root_path.file_name().and_then(|s| s.to_str()).unwrap_or("Catalog");
+    let total_sheets = app.sheet_entries.len();
+    let total_workbooks = app.catalog.workbooks.len();
+    let header_title = if total_workbooks > 1 {
+        format!(" 📊 Multi-Workbook Catalog (rtb xlsx) — {} ({} files/schemas, {} total sheets) ", filename, total_workbooks, total_sheets)
+    } else {
+        format!(" 📊 Excel & Spreadsheet Inspector (rtb xlsx) — {} ({} sheets) ", filename, total_sheets)
+    };
+
     let header = Paragraph::new(header_title)
         .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .block(Block::default().borders(Borders::ALL).style(Style::default().fg(Color::Cyan)));
@@ -198,20 +238,31 @@ fn ui(f: &mut Frame, app: &XlsxTuiApp, focus_sidebar: bool) {
     // 2. Main Body (Sidebar + Table)
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+        .constraints([Constraint::Percentage(28), Constraint::Percentage(72)])
         .split(chunks[1]);
 
-    // Sidebar: Worksheets
+    // Sidebar: Schemas & Worksheets
     let sheet_items: Vec<ListItem> = app
-        .workbook
-        .sheet_names
+        .sheet_entries
         .iter()
         .enumerate()
-        .map(|(i, name)| {
-            let row_count = app.workbook.sheets.get(name).map(|s| s.rows.len()).unwrap_or(0);
+        .map(|(i, entry)| {
+            let row_count = app
+                .catalog
+                .workbooks
+                .get(entry.wb_idx)
+                .and_then(|wb| wb.sheets.get(&entry.sheet_name))
+                .map(|s| s.rows.len())
+                .unwrap_or(0);
+
             let prefix = if i == app.selected_sheet_idx { "▶ " } else { "  " };
-            let text = format!("{}{:<18} ({}r)", prefix, name, row_count);
-            ListItem::new(text).style(if i == app.selected_sheet_idx {
+            let label = if app.catalog.workbooks.len() > 1 {
+                format!("{}{}.{} ({}r)", prefix, entry.schema_name, entry.sheet_name, row_count)
+            } else {
+                format!("{}{:<18} ({}r)", prefix, entry.sheet_name, row_count)
+            };
+
+            ListItem::new(label).style(if i == app.selected_sheet_idx {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
@@ -220,10 +271,11 @@ fn ui(f: &mut Frame, app: &XlsxTuiApp, focus_sidebar: bool) {
         .collect();
 
     let sidebar_border_color = if focus_sidebar { Color::Green } else { Color::DarkGray };
+    let sidebar_title = if app.catalog.workbooks.len() > 1 { " 📁 Schemas & Sheets " } else { " 📁 Worksheets " };
     let sheet_list = List::new(sheet_items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" 📁 Worksheets ")
+            .title(sidebar_title)
             .border_style(Style::default().fg(sidebar_border_color)),
     );
     let mut list_state = ListState::default();
