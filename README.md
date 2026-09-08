@@ -1,4 +1,4 @@
-# rusty-toolbox (`tb`)
+# rusty-toolbox (`rtb`)
 
 A blazing fast, cross-platform developer Swiss Army knife written in Rust with zero JVM/heavy runtime dependencies.
 
@@ -6,7 +6,7 @@ Runs anywhere: **macOS**, **Linux**, and **Windows**.
 
 ---
 
-## ⚡ Highlights: `tb hsql` (Native HyperSQL / HSQLDB Client)
+## ⚡ Highlights: `rrtb hsql` (Native HyperSQL / HSQLDB Client)
 
 Inspect and query HyperSQL (HSQLDB) database catalogs, files, and schemas without installing Java or JDBC drivers.
 
@@ -22,17 +22,17 @@ Inspect and query HyperSQL (HSQLDB) database catalogs, files, and schemas withou
 
 ```bash
 # 1. Open interactive TUI explorer
-tb hsql ./data/sample_hsqldb/
+rrtb hsql ./data/sample_hsqldb/
 # or
-tb hsql ./data/sample_hsqldb/mydb.script -i
+rrtb hsql ./data/sample_hsqldb/mydb.script -i
 
 # 2. Run direct SQL queries in your shell (scriptable)
-tb hsql ./data/sample_hsqldb/ "SELECT * FROM USERS WHERE ACTIVE = 1"
+rrtb hsql ./data/sample_hsqldb/ "SELECT * FROM USERS WHERE ACTIVE = 1"
 
-tb hsql ./data/sample_hsqldb/ "SELECT u.USERNAME, o.ORDER_ID, o.AMOUNT FROM USERS u JOIN ORDERS o ON u.ID = o.USER_ID"
+rrtb hsql ./data/sample_hsqldb/ "SELECT u.USERNAME, o.ORDER_ID, o.AMOUNT FROM USERS u JOIN ORDERS o ON u.ID = o.USER_ID"
 
 # 3. Export HSQLDB database to a standalone SQLite database file
-tb hsql ./data/sample_hsqldb/ --dump-sqlite exported_hsql.db
+rrtb hsql ./data/sample_hsqldb/ --dump-sqlite exported_hsql.db
 ```
 
 ### TUI Keybindings
@@ -62,19 +62,19 @@ alias tb="/path/to/rusty-toolbox/target/release/rusty-toolbox"
 
 ---
 
-## 📋 Full Toolset Overview (`tb`)
+## 📋 Full Toolset Overview (`rtb`)
 
 See [`SPEC.md`](SPEC.md) for the complete specification of all 17 planned developer tools:
-1. `tb hsql` — HyperSQL native inspector & SQLite converter
-2. `tb jwt` — Offline JWT decoder & visualizer
-3. `tb time` — Epoch & multi-timezone converter
-4. `tb json` — High-speed JSON schema & path extractor
-5. `tb cert` — X.509 TLS/SSL certificate inspector
-6. `tb port` — Port listener & process identifier
-7. `tb b64` / `tb url` / `tb hash` — Fast encoders, decoders, and checksum tools
-8. `tb ip` / `tb cidr` — IP subnet calculations and local interface scanner
-9. `tb diff` — Semantic AST & JSON diff tool
-10. `tb cron` — Cron expression parser and next execution schedule predictor
+1. `rrtb hsql` — HyperSQL native inspector & SQLite converter
+2. `rtb jwt` — Offline JWT decoder & visualizer
+3. `rtb time` — Epoch & multi-timezone converter
+4. `rtb json` — High-speed JSON schema & path extractor
+5. `rtb cert` — X.509 TLS/SSL certificate inspector
+6. `rtb port` — Port listener & process identifier
+7. `rtb b64` / `rtb url` / `rtb hash` — Fast encoders, decoders, and checksum tools
+8. `rtb ip` / `rtb cidr` — IP subnet calculations and local interface scanner
+9. `rtb diff` — Semantic AST & JSON diff tool
+10. `rtb cron` — Cron expression parser and next execution schedule predictor
 
 ---
 

@@ -4,8 +4,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "tb")]
-#[command(about = "🧰 Rusty Toolbox: Ultra-fast, cross-platform developer tools", long_about = None)]
+#[command(name = "rtb")]
+#[command(about = "🧰 Rusty Toolbox (rtb): Ultra-fast, cross-platform developer tools", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
