@@ -31,6 +31,26 @@ enum Commands {
         #[arg(long, value_name = "OUT_SQLITE_FILE")]
         dump_sqlite: Option<PathBuf>,
     },
+
+    /// Excel / Spreadsheet (.xlsx, .xls, .ods) SQL Query Runner & Inspector
+    #[command(alias = "excel", alias = "sheet")]
+    Xlsx {
+        /// Path to .xlsx, .xls, .ods, or .csv spreadsheet file
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+
+        /// SQL query to execute against worksheets (e.g. 'SELECT * FROM Sheet1')
+        #[arg(value_name = "QUERY")]
+        query: Option<String>,
+
+        /// Launch interactive TUI spreadsheet browser
+        #[arg(short, long)]
+        interactive: bool,
+
+        /// Export all worksheets as tables into an SQLite database file
+        #[arg(long, value_name = "OUT_SQLITE_FILE")]
+        dump_sqlite: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,6 +64,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dump_sqlite,
         } => {
             modules::hsql::execute_hsql_command(path, query, interactive, dump_sqlite)?;
+        }
+        Commands::Xlsx {
+            path,
+            query,
+            interactive,
+            dump_sqlite,
+        } => {
+            modules::xlsx::execute_xlsx_command(path, query, interactive, dump_sqlite)?;
         }
     }
 

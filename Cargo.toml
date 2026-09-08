@@ -8,6 +8,7 @@ name = "rtb"
 path = "src/main.rs"
 
 [dependencies]
+calamine = "0.26"
 chrono = "0.4.45"
 clap = { version = "4.6.6", features = ["derive"] }
 colored = "3.1.1"
@@ -15,3 +16,4 @@ crossterm = "0.29.0"
 ratatui = "0.30.2"
 regex = "1.13.1"
 rusqlite = "0.40.2"
+rust_xlsxwriter = "0.8"
