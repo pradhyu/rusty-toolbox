@@ -15,6 +15,9 @@ use ratatui::{
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -26,7 +29,8 @@ struct SheetEntry {
 
 pub struct XlsxTuiApp {
     catalog: ExcelCatalog,
-    conn: Option<Connection>,
+    conn_shared: Arc<Mutex<Option<Connection>>>,
+    is_indexing: Arc<AtomicBool>,
     sheet_entries: Vec<SheetEntry>,
     selected_sheet_idx: usize,
     selected_row_idx: usize,
@@ -36,6 +40,7 @@ pub struct XlsxTuiApp {
     status_msg: String,
     query_input: String,
     in_query_mode: bool,
+    has_more_rows: bool,
 }
 
 impl XlsxTuiApp {
@@ -52,23 +57,38 @@ impl XlsxTuiApp {
             }
         }
 
+        let conn_shared = Arc::new(Mutex::new(None));
+        let is_indexing = Arc::new(AtomicBool::new(true));
+
+        // Spawn background worker to index SQLite without blocking UI startup
+        let catalog_clone = catalog.clone();
+        let conn_bg = Arc::clone(&conn_shared);
+        let indexing_bg = Arc::clone(&is_indexing);
+
+        thread::spawn(move || {
+            if let Ok(conn) = catalog_clone.create_in_memory_sqlite() {
+                if let Ok(mut lock) = conn_bg.lock() {
+                    *lock = Some(conn);
+                }
+            }
+            indexing_bg.store(false, Ordering::SeqCst);
+        });
+
         let mut app = Self {
             catalog,
-            conn: None,
+            conn_shared,
+            is_indexing,
             sheet_entries,
             selected_sheet_idx: 0,
             selected_row_idx: 0,
             multi_selected_rows: HashSet::new(),
             current_columns: Vec::new(),
             current_rows: Vec::new(),
-            status_msg: "Ready. [Space] Select  [y] Yank  [/] SQL Query  [Tab] Switch".to_string(),
+            status_msg: "Ready (Instant Preview). [Space] Select  [y] Yank  [/] SQL Query".to_string(),
             query_input: String::new(),
             in_query_mode: false,
+            has_more_rows: true,
         };
-
-        if let Ok(conn) = app.catalog.create_in_memory_sqlite() {
-            app.conn = Some(conn);
-        }
 
         app.load_active_sheet();
         app
@@ -82,10 +102,40 @@ impl XlsxTuiApp {
                     self.current_rows = sheet.rows.clone();
                     self.selected_row_idx = 0;
                     self.multi_selected_rows.clear();
+                    self.has_more_rows = true;
                     if self.catalog.workbooks.len() > 1 {
-                        self.status_msg = format!("Schema: '{}' | Sheet: '{}' ({} rows, {} cols)", entry.schema_name, entry.sheet_name, sheet.rows.len(), sheet.columns.len());
+                        self.status_msg = format!("Schema: '{}' | Sheet: '{}' (previewing top {} rows)", entry.schema_name, entry.sheet_name, sheet.rows.len());
                     } else {
-                        self.status_msg = format!("Sheet: '{}' ({} rows, {} cols)", entry.sheet_name, sheet.rows.len(), sheet.columns.len());
+                        self.status_msg = format!("Sheet: '{}' (previewing top {} rows)", entry.sheet_name, sheet.rows.len());
+                    }
+                }
+            }
+        }
+    }
+
+    fn maybe_load_more_rows(&mut self) {
+        if !self.has_more_rows {
+            return;
+        }
+
+        if let Ok(lock) = self.conn_shared.lock() {
+            if let Some(ref conn) = *lock {
+                if let Some(entry) = self.sheet_entries.get(self.selected_sheet_idx) {
+                    let table_ref = if self.catalog.workbooks.len() > 1 {
+                        format!("\"{}\".\"{}\"", entry.schema_name, entry.sheet_name)
+                    } else {
+                        format!("\"{}\"", entry.sheet_name)
+                    };
+
+                    let offset = self.current_rows.len();
+                    let page_sql = format!("SELECT * FROM {} LIMIT 1000 OFFSET {}", table_ref, offset);
+                    if let Ok((_, more_rows)) = query_to_table(conn, &page_sql) {
+                        if more_rows.is_empty() {
+                            self.has_more_rows = false;
+                        } else {
+                            self.current_rows.extend(more_rows);
+                            self.status_msg = format!("Loaded {} rows (scroll down for more)", self.current_rows.len());
+                        }
                     }
                 }
             }
@@ -101,21 +151,38 @@ impl XlsxTuiApp {
 
         let cleaned_query = crate::modules::xlsx::clean_sql_query(query);
 
-        if let Some(ref conn) = self.conn {
-            match query_to_table(conn, &cleaned_query) {
-                Ok((cols, rows)) => {
-                    self.current_columns = cols;
-                    let count = rows.len();
-                    self.current_rows = rows;
-                    self.selected_row_idx = 0;
-                    self.multi_selected_rows.clear();
-                    self.status_msg = format!("Query OK: {} rows returned", count);
-                }
-                Err(err) => {
-                    self.status_msg = format!("SQL Error: {}", err);
+        // Wait if indexing is still actively building initial SQLite schema
+        let mut attempts = 0;
+        loop {
+            if let Ok(lock) = self.conn_shared.lock() {
+                if let Some(ref conn) = *lock {
+                    match query_to_table(conn, &cleaned_query) {
+                        Ok((cols, rows)) => {
+                            self.current_columns = cols;
+                            let count = rows.len();
+                            self.current_rows = rows;
+                            self.selected_row_idx = 0;
+                            self.multi_selected_rows.clear();
+                            self.has_more_rows = false;
+                            self.status_msg = format!("Query OK: {} rows returned", count);
+                            return;
+                        }
+                        Err(err) => {
+                            self.status_msg = format!("SQL Error: {}", err);
+                            return;
+                        }
+                    }
                 }
             }
+
+            if !self.is_indexing.load(Ordering::SeqCst) || attempts > 20 {
+                break;
+            }
+            attempts += 1;
+            thread::sleep(Duration::from_millis(50));
         }
+
+        self.status_msg = "Database indexing in progress, please retry in a moment...".to_string();
     }
 
     fn yank_selection_to_clipboard(&mut self) {
@@ -183,7 +250,7 @@ impl XlsxTuiApp {
             self.status_msg = "Cleared all selections".to_string();
         } else {
             self.multi_selected_rows = (0..self.current_rows.len()).collect();
-            self.status_msg = format!("Selected all {} rows. Press 'y' to yank.", self.current_rows.len());
+            self.status_msg = format!("Selected all {} visible rows. Press 'y' to yank.", self.current_rows.len());
         }
     }
 }
@@ -201,7 +268,7 @@ pub fn run_xlsx_tui(catalog: ExcelCatalog) -> Result<(), Box<dyn std::error::Err
     loop {
         terminal.draw(|f| ui(f, &app, focus_sidebar))?;
 
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if app.in_query_mode {
                     match key.code {
@@ -276,8 +343,13 @@ pub fn run_xlsx_tui(catalog: ExcelCatalog) -> Result<(), Box<dyn std::error::Err
                                     app.selected_sheet_idx += 1;
                                     app.load_active_sheet();
                                 }
-                            } else if app.selected_row_idx + 1 < app.current_rows.len() {
-                                app.selected_row_idx += 1;
+                            } else {
+                                if app.selected_row_idx + 1 < app.current_rows.len() {
+                                    app.selected_row_idx += 1;
+                                }
+                                if app.selected_row_idx + 25 >= app.current_rows.len() {
+                                    app.maybe_load_more_rows();
+                                }
                             }
                         }
                         KeyCode::PageUp => {
@@ -289,6 +361,9 @@ pub fn run_xlsx_tui(catalog: ExcelCatalog) -> Result<(), Box<dyn std::error::Err
                             if !focus_sidebar {
                                 let max_len = app.current_rows.len().saturating_sub(1);
                                 app.selected_row_idx = (app.selected_row_idx + 15).min(max_len);
+                                if app.selected_row_idx + 25 >= app.current_rows.len() {
+                                    app.maybe_load_more_rows();
+                                }
                             }
                         }
                         _ => {}
@@ -318,10 +393,16 @@ fn ui(f: &mut Frame, app: &XlsxTuiApp, focus_sidebar: bool) {
     let filename = app.catalog.root_path.file_name().and_then(|s| s.to_str()).unwrap_or("Catalog");
     let total_sheets = app.sheet_entries.len();
     let total_workbooks = app.catalog.workbooks.len();
-    let header_title = if total_workbooks > 1 {
-        format!(" 📊 Multi-Workbook Catalog (rtb xlsx) — {} ({} files/schemas, {} total sheets) ", filename, total_workbooks, total_sheets)
+    let index_badge = if app.is_indexing.load(Ordering::Relaxed) {
+        " [Indexing...]"
     } else {
-        format!(" 📊 Excel & Spreadsheet Inspector (rtb xlsx) — {} ({} sheets) ", filename, total_sheets)
+        ""
+    };
+
+    let header_title = if total_workbooks > 1 {
+        format!(" 📊 Multi-Workbook Catalog (rtb xlsx) — {} ({} files/schemas, {} total sheets){} ", filename, total_workbooks, total_sheets, index_badge)
+    } else {
+        format!(" 📊 Excel & Spreadsheet Inspector (rtb xlsx) — {} ({} sheets){} ", filename, total_sheets, index_badge)
     };
 
     let header = Paragraph::new(header_title)
@@ -428,7 +509,7 @@ fn ui(f: &mut Frame, app: &XlsxTuiApp, focus_sidebar: bool) {
     } else {
         String::new()
     };
-    let table_title = format!(" 📄 Data Grid ({} rows){} ", app.current_rows.len(), sel_info);
+    let table_title = format!(" 📄 Data Grid ({} rows loaded){} ", app.current_rows.len(), sel_info);
     let table_widget = Table::new(rows, widths)
         .header(header_row)
         .block(

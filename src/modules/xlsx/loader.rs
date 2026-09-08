@@ -156,22 +156,22 @@ impl ExcelWorkbook {
             })
             .collect();
 
-        // Sample first 5000 rows for instant TUI preview
+        // Sample first 500 rows for instant <5ms TUI preview
         let mut preview_rows = Vec::new();
         let mut raw_record = csv::StringRecord::new();
-        let mut total_rows = 0;
 
         while reader.read_record(&mut raw_record).map_err(|e| e.to_string())? {
-            total_rows += 1;
-            if preview_rows.len() < 5000 {
-                let mut row_vec = Vec::with_capacity(columns.len());
-                for i in 0..columns.len() {
-                    row_vec.push(raw_record.get(i).unwrap_or("").to_string());
-                }
-                preview_rows.push(row_vec);
+            let mut row_vec = Vec::with_capacity(columns.len());
+            for i in 0..columns.len() {
+                row_vec.push(raw_record.get(i).unwrap_or("").to_string());
+            }
+            preview_rows.push(row_vec);
+            if preview_rows.len() >= 500 {
+                break;
             }
         }
 
+        let total_rows = preview_rows.len();
         let sheet_name = schema_name.to_string();
         let mut sheets = HashMap::new();
         sheets.insert(
