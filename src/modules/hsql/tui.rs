@@ -393,6 +393,49 @@ fn run_loop(
                                         app.status_msg = "Cleared selection".to_string();
                                     }
                                 }
+                                KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    if !app.focus_sidebar {
+                                        let max_len = app.current_rows.len().saturating_sub(1);
+                                        app.selected_row_idx = (app.selected_row_idx + 25).min(max_len);
+                                    }
+                                }
+                                KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    if !app.focus_sidebar {
+                                        app.selected_row_idx = app.selected_row_idx.saturating_sub(25);
+                                    }
+                                }
+                                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    if !app.focus_sidebar {
+                                        let max_len = app.current_rows.len().saturating_sub(1);
+                                        app.selected_row_idx = (app.selected_row_idx + 25).min(max_len);
+                                    }
+                                }
+                                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    if !app.focus_sidebar {
+                                        app.selected_row_idx = app.selected_row_idx.saturating_sub(25);
+                                    }
+                                }
+                                KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    if !app.focus_sidebar {
+                                        let max_len = app.current_rows.len().saturating_sub(1);
+                                        app.selected_row_idx = (app.selected_row_idx + 25).min(max_len);
+                                    }
+                                }
+                                KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    if !app.focus_sidebar {
+                                        app.selected_row_idx = app.selected_row_idx.saturating_sub(25);
+                                    }
+                                }
+                                KeyCode::Home | KeyCode::Char('g') => {
+                                    if !app.focus_sidebar {
+                                        app.selected_row_idx = 0;
+                                    }
+                                }
+                                KeyCode::End | KeyCode::Char('G') => {
+                                    if !app.focus_sidebar {
+                                        app.selected_row_idx = app.current_rows.len().saturating_sub(1);
+                                    }
+                                }
                                 KeyCode::Up | KeyCode::Char('k') => {
                                     if app.focus_sidebar {
                                         if app.selected_table_idx > 0 {
@@ -415,13 +458,13 @@ fn run_loop(
                                 }
                                 KeyCode::PageUp => {
                                     if !app.focus_sidebar {
-                                        app.selected_row_idx = app.selected_row_idx.saturating_sub(15);
+                                        app.selected_row_idx = app.selected_row_idx.saturating_sub(25);
                                     }
                                 }
                                 KeyCode::PageDown => {
                                     if !app.focus_sidebar {
                                         let max_len = app.current_rows.len().saturating_sub(1);
-                                        app.selected_row_idx = (app.selected_row_idx + 15).min(max_len);
+                                        app.selected_row_idx = (app.selected_row_idx + 25).min(max_len);
                                     }
                                 }
                                 _ => {}

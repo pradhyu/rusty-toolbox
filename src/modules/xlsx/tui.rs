@@ -151,38 +151,33 @@ impl XlsxTuiApp {
 
         let cleaned_query = crate::modules::xlsx::clean_sql_query(query);
 
-        // Wait if indexing is still actively building initial SQLite schema
-        let mut attempts = 0;
-        loop {
-            if let Ok(lock) = self.conn_shared.lock() {
-                if let Some(ref conn) = *lock {
-                    match query_to_table(conn, &cleaned_query) {
-                        Ok((cols, rows)) => {
-                            self.current_columns = cols;
-                            let count = rows.len();
-                            self.current_rows = rows;
-                            self.selected_row_idx = 0;
-                            self.multi_selected_rows.clear();
-                            self.has_more_rows = false;
-                            self.status_msg = format!("Query OK: {} rows returned", count);
-                            return;
-                        }
-                        Err(err) => {
-                            self.status_msg = format!("SQL Error: {}", err);
-                            return;
-                        }
-                    }
-                }
-            }
-
-            if !self.is_indexing.load(Ordering::SeqCst) || attempts > 20 {
-                break;
-            }
-            attempts += 1;
+        // If indexing is in progress in background, wait for it to complete
+        while self.is_indexing.load(Ordering::SeqCst) {
             thread::sleep(Duration::from_millis(50));
         }
 
-        self.status_msg = "Database indexing in progress, please retry in a moment...".to_string();
+        if let Ok(lock) = self.conn_shared.lock() {
+            if let Some(ref conn) = *lock {
+                match query_to_table(conn, &cleaned_query) {
+                    Ok((cols, rows)) => {
+                        self.current_columns = cols;
+                        let count = rows.len();
+                        self.current_rows = rows;
+                        self.selected_row_idx = 0;
+                        self.multi_selected_rows.clear();
+                        self.has_more_rows = false;
+                        self.status_msg = format!("Query OK: {} rows returned", count);
+                        return;
+                    }
+                    Err(err) => {
+                        self.status_msg = format!("SQL Error: {}", err);
+                        return;
+                    }
+                }
+            }
+        }
+
+        self.status_msg = "Database connection error".to_string();
     }
 
     fn yank_selection_to_clipboard(&mut self) {
@@ -327,6 +322,59 @@ pub fn run_xlsx_tui(catalog: ExcelCatalog) -> Result<(), Box<dyn std::error::Err
                                 app.status_msg = "Cleared selection".to_string();
                             }
                         }
+                        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if !focus_sidebar {
+                                let max_len = app.current_rows.len().saturating_sub(1);
+                                app.selected_row_idx = (app.selected_row_idx + 25).min(max_len);
+                                if app.selected_row_idx + 25 >= app.current_rows.len() {
+                                    app.maybe_load_more_rows();
+                                }
+                            }
+                        }
+                        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if !focus_sidebar {
+                                app.selected_row_idx = app.selected_row_idx.saturating_sub(25);
+                            }
+                        }
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if !focus_sidebar {
+                                let max_len = app.current_rows.len().saturating_sub(1);
+                                app.selected_row_idx = (app.selected_row_idx + 25).min(max_len);
+                                if app.selected_row_idx + 25 >= app.current_rows.len() {
+                                    app.maybe_load_more_rows();
+                                }
+                            }
+                        }
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if !focus_sidebar {
+                                app.selected_row_idx = app.selected_row_idx.saturating_sub(25);
+                            }
+                        }
+                        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if !focus_sidebar {
+                                let max_len = app.current_rows.len().saturating_sub(1);
+                                app.selected_row_idx = (app.selected_row_idx + 25).min(max_len);
+                                if app.selected_row_idx + 25 >= app.current_rows.len() {
+                                    app.maybe_load_more_rows();
+                                }
+                            }
+                        }
+                        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if !focus_sidebar {
+                                app.selected_row_idx = app.selected_row_idx.saturating_sub(25);
+                            }
+                        }
+                        KeyCode::Home | KeyCode::Char('g') => {
+                            if !focus_sidebar {
+                                app.selected_row_idx = 0;
+                            }
+                        }
+                        KeyCode::End | KeyCode::Char('G') => {
+                            if !focus_sidebar {
+                                app.selected_row_idx = app.current_rows.len().saturating_sub(1);
+                                app.maybe_load_more_rows();
+                            }
+                        }
                         KeyCode::Up | KeyCode::Char('k') => {
                             if focus_sidebar {
                                 if app.selected_sheet_idx > 0 {
@@ -354,13 +402,13 @@ pub fn run_xlsx_tui(catalog: ExcelCatalog) -> Result<(), Box<dyn std::error::Err
                         }
                         KeyCode::PageUp => {
                             if !focus_sidebar {
-                                app.selected_row_idx = app.selected_row_idx.saturating_sub(15);
+                                app.selected_row_idx = app.selected_row_idx.saturating_sub(25);
                             }
                         }
                         KeyCode::PageDown => {
                             if !focus_sidebar {
                                 let max_len = app.current_rows.len().saturating_sub(1);
-                                app.selected_row_idx = (app.selected_row_idx + 15).min(max_len);
+                                app.selected_row_idx = (app.selected_row_idx + 25).min(max_len);
                                 if app.selected_row_idx + 25 >= app.current_rows.len() {
                                     app.maybe_load_more_rows();
                                 }
