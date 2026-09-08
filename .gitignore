@@ -5,3 +5,4 @@ benchmark_*.csv
 *.csv
 !examples/employees.csv
 !examples/sample_catalog/shipping_partners.csv
+benchmark_*.xlsx

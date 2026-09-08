@@ -12,6 +12,7 @@ pub struct SheetData {
     pub schema_name: String,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<String>>,
+    pub total_rows: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +22,7 @@ pub struct ExcelWorkbook {
     pub schema_name: String,
     pub sheets: HashMap<String, SheetData>,
     pub sheet_names: Vec<String>,
+    pub is_csv: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -88,7 +90,7 @@ impl ExcelWorkbook {
                         }
                     }
 
-                    // Process remaining rows
+                    // For large sheets, keep top 5000 in memory for immediate UI preview
                     for row in iter {
                         let mut row_vec = Vec::new();
                         let mut has_content = false;
@@ -108,6 +110,7 @@ impl ExcelWorkbook {
                     }
                 }
 
+                let total_rows = data_rows.len();
                 sheets.insert(
                     name.clone(),
                     SheetData {
@@ -115,6 +118,7 @@ impl ExcelWorkbook {
                         schema_name: schema_name.clone(),
                         columns,
                         rows: data_rows,
+                        total_rows,
                     },
                 );
             }
@@ -125,6 +129,7 @@ impl ExcelWorkbook {
             schema_name,
             sheets,
             sheet_names,
+            is_csv: false,
         })
     }
 
@@ -133,6 +138,7 @@ impl ExcelWorkbook {
             .has_headers(true)
             .flexible(true)
             .delimiter(delimiter)
+            .buffer_capacity(1024 * 1024 * 2)
             .from_path(path)
             .map_err(|e| format!("Failed to read CSV '{}': {}", path.display(), e))?;
 
@@ -150,17 +156,20 @@ impl ExcelWorkbook {
             })
             .collect();
 
-        let mut data_rows = Vec::new();
-        for result in reader.records() {
-            let record = result.map_err(|e| format!("CSV row error in '{}': {}", path.display(), e))?;
-            let mut row_vec = Vec::new();
-            for field in record.iter() {
-                row_vec.push(field.to_string());
+        // Sample first 5000 rows for instant TUI preview
+        let mut preview_rows = Vec::new();
+        let mut raw_record = csv::StringRecord::new();
+        let mut total_rows = 0;
+
+        while reader.read_record(&mut raw_record).map_err(|e| e.to_string())? {
+            total_rows += 1;
+            if preview_rows.len() < 5000 {
+                let mut row_vec = Vec::with_capacity(columns.len());
+                for i in 0..columns.len() {
+                    row_vec.push(raw_record.get(i).unwrap_or("").to_string());
+                }
+                preview_rows.push(row_vec);
             }
-            while row_vec.len() < columns.len() {
-                row_vec.push(String::new());
-            }
-            data_rows.push(row_vec);
         }
 
         let sheet_name = schema_name.to_string();
@@ -171,7 +180,8 @@ impl ExcelWorkbook {
                 name: sheet_name.clone(),
                 schema_name: schema_name.to_string(),
                 columns,
-                rows: data_rows,
+                rows: preview_rows,
+                total_rows,
             },
         );
 
@@ -180,6 +190,7 @@ impl ExcelWorkbook {
             schema_name: schema_name.to_string(),
             sheets,
             sheet_names: vec![sheet_name],
+            is_csv: true,
         })
     }
 }
@@ -238,16 +249,33 @@ impl ExcelCatalog {
     }
 
     pub fn create_in_memory_sqlite(&self) -> Result<Connection, String> {
-        let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
+        let mut conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
+        
+        // High performance SQLite tuning for multi-million row throughput
+        conn.execute_batch(
+            "PRAGMA synchronous = OFF;
+             PRAGMA journal_mode = OFF;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA cache_size = -500000;"
+        ).map_err(|e| e.to_string())?;
+
         let is_multi = self.workbooks.len() > 1;
 
         for wb in &self.workbooks {
-            // Attach in-memory schema if multiple workbooks
             if is_multi {
                 let attach_sql = format!("ATTACH DATABASE ':memory:' AS \"{}\";", wb.schema_name);
                 let _ = conn.execute(&attach_sql, []);
             }
 
+            if wb.is_csv {
+                let ext = wb.path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
+                let delimiter = if ext == "tsv" { b'\t' } else { b',' };
+                stream_csv_to_sqlite(&mut conn, &wb.path, &wb.schema_name, is_multi, delimiter)?;
+                continue;
+            }
+
+            // For Excel workbooks: use a single fast transaction and prepared statement
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
             for sheet in wb.sheets.values() {
                 if sheet.columns.is_empty() {
                     continue;
@@ -260,8 +288,6 @@ impl ExcelCatalog {
                     .collect();
 
                 let sanitized_sheet_name = sheet.name.replace('"', "\"\"");
-
-                // 1. Target table in attached schema (or main)
                 let target_table = if is_multi {
                     format!("\"{}\".\"{}\"", wb.schema_name, sanitized_sheet_name)
                 } else {
@@ -269,42 +295,37 @@ impl ExcelCatalog {
                 };
 
                 let create_sql = format!("CREATE TABLE IF NOT EXISTS {} ({});", target_table, col_defs.join(", "));
-                conn.execute(&create_sql, []).map_err(|e| format!("Failed to create table {}: {}", target_table, e))?;
+                tx.execute(&create_sql, []).map_err(|e| format!("Failed to create table {}: {}", target_table, e))?;
+
+                let placeholders = vec!["?"; sheet.columns.len()].join(", ");
+                let insert_sql = format!("INSERT INTO {} VALUES ({});", target_table, placeholders);
+                let mut stmt = tx.prepare(&insert_sql).map_err(|e| e.to_string())?;
 
                 for row in &sheet.rows {
-                    let placeholders = vec!["?"; sheet.columns.len()].join(", ");
-                    let insert_sql = format!("INSERT INTO {} VALUES ({});", target_table, placeholders);
-
-                    let mut params_vec: Vec<String> = Vec::new();
+                    let mut params_vec: Vec<&str> = Vec::with_capacity(sheet.columns.len());
                     for i in 0..sheet.columns.len() {
-                        params_vec.push(row.get(i).cloned().unwrap_or_default());
+                        params_vec.push(row.get(i).map(|s| s.as_str()).unwrap_or(""));
                     }
-
                     let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-                    let _ = conn.execute(&insert_sql, params_refs.as_slice());
+                    let _ = stmt.execute(params_refs.as_slice());
                 }
+            }
+            tx.commit().map_err(|e| e.to_string())?;
 
-                // 2. Convenience aliases in main database
-                if is_multi {
-                    // Create view `<schema>_<sheet>` in main schema
+            // Views
+            if is_multi {
+                for sheet in wb.sheets.values() {
+                    let sanitized_sheet_name = sheet.name.replace('"', "\"\"");
+                    let target_table = format!("\"{}\".\"{}\"", wb.schema_name, sanitized_sheet_name);
+
                     let alias_name = format!("{}_{}", wb.schema_name, sanitized_sheet_name);
                     let view_sql = format!("CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM {};", alias_name, target_table);
                     let _ = conn.execute(&view_sql, []);
 
-                    // Create view `<schema>` directly if schema == sheet_name (e.g. CSV files)
                     if wb.schema_name == sanitized_sheet_name {
                         let direct_view = format!("CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM {};", wb.schema_name, target_table);
                         let _ = conn.execute(&direct_view, []);
                     }
-
-                    // Create view `"<schema>.<sheet>"` in main schema for dot syntax fallback
-                    let dot_alias = format!("{}.{}", wb.schema_name, sanitized_sheet_name);
-                    let dot_view_sql = format!("CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM {};", dot_alias, target_table);
-                    let _ = conn.execute(&dot_view_sql, []);
-                } else {
-                    // Single file mode: also alias 'data' for quick generic queries
-                    let data_view = format!("CREATE VIEW IF NOT EXISTS \"data\" AS SELECT * FROM {};", target_table);
-                    let _ = conn.execute(&data_view, []);
                 }
             }
         }
@@ -313,10 +334,24 @@ impl ExcelCatalog {
     }
 
     pub fn export_to_sqlite<P: AsRef<Path>>(&self, out_path: P) -> Result<(), String> {
-        let conn = Connection::open(out_path).map_err(|e| e.to_string())?;
+        let mut conn = Connection::open(out_path).map_err(|e| e.to_string())?;
+        conn.execute_batch(
+            "PRAGMA synchronous = OFF;
+             PRAGMA journal_mode = OFF;
+             PRAGMA cache_size = -500000;"
+        ).map_err(|e| e.to_string())?;
+
         let is_multi = self.workbooks.len() > 1;
 
         for wb in &self.workbooks {
+            if wb.is_csv {
+                let ext = wb.path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
+                let delimiter = if ext == "tsv" { b'\t' } else { b',' };
+                stream_csv_to_sqlite(&mut conn, &wb.path, &wb.schema_name, false, delimiter)?;
+                continue;
+            }
+
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
             for sheet in wb.sheets.values() {
                 if sheet.columns.is_empty() {
                     continue;
@@ -340,25 +375,107 @@ impl ExcelCatalog {
                 };
 
                 let create_sql = format!("CREATE TABLE IF NOT EXISTS \"{}\" ({});", table_name, col_defs.join(", "));
-                conn.execute(&create_sql, []).map_err(|e| e.to_string())?;
+                tx.execute(&create_sql, []).map_err(|e| e.to_string())?;
+
+                let placeholders = vec!["?"; sheet.columns.len()].join(", ");
+                let insert_sql = format!("INSERT INTO \"{}\" VALUES ({});", table_name, placeholders);
+                let mut stmt = tx.prepare(&insert_sql).map_err(|e| e.to_string())?;
 
                 for row in &sheet.rows {
-                    let placeholders = vec!["?"; sheet.columns.len()].join(", ");
-                    let insert_sql = format!("INSERT INTO \"{}\" VALUES ({});", table_name, placeholders);
-
-                    let mut params_vec: Vec<String> = Vec::new();
+                    let mut params_vec: Vec<&str> = Vec::with_capacity(sheet.columns.len());
                     for i in 0..sheet.columns.len() {
-                        params_vec.push(row.get(i).cloned().unwrap_or_default());
+                        params_vec.push(row.get(i).map(|s| s.as_str()).unwrap_or(""));
                     }
-
                     let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-                    let _ = conn.execute(&insert_sql, params_refs.as_slice());
+                    let _ = stmt.execute(params_refs.as_slice());
                 }
             }
+            tx.commit().map_err(|e| e.to_string())?;
         }
 
         Ok(())
     }
+}
+
+fn stream_csv_to_sqlite(
+    conn: &mut Connection,
+    path: &Path,
+    schema_name: &str,
+    is_multi: bool,
+    delimiter: u8,
+) -> Result<(), String> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .delimiter(delimiter)
+        .buffer_capacity(1024 * 1024 * 4) // 4MB read buffer
+        .from_path(path)
+        .map_err(|e| format!("Failed to open CSV '{}': {}", path.display(), e))?;
+
+    let headers = reader.headers().map_err(|e| format!("Headers error in '{}': {}", path.display(), e))?;
+    let columns: Vec<String> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let s = h.trim();
+            if s.is_empty() {
+                format!("col_{}", i + 1)
+            } else {
+                s.to_string()
+            }
+        })
+        .collect();
+
+    let sanitized_sheet_name = schema_name.replace('"', "\"\"");
+    let target_table = if is_multi {
+        format!("\"{}\".\"{}\"", schema_name, sanitized_sheet_name)
+    } else {
+        format!("\"{}\"", sanitized_sheet_name)
+    };
+
+    let col_defs: Vec<String> = columns
+        .iter()
+        .map(|c| format!("\"{}\" TEXT", c.replace('"', "\"\"")))
+        .collect();
+
+    let create_sql = format!("CREATE TABLE IF NOT EXISTS {} ({});", target_table, col_defs.join(", "));
+    conn.execute(&create_sql, []).map_err(|e| e.to_string())?;
+
+    let placeholders = vec!["?"; columns.len()].join(", ");
+    let insert_sql = format!("INSERT INTO {} VALUES ({});", target_table, placeholders);
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    {
+        let mut stmt = tx.prepare(&insert_sql).map_err(|e| e.to_string())?;
+        let mut raw_record = csv::StringRecord::new();
+
+        while reader.read_record(&mut raw_record).map_err(|e| e.to_string())? {
+            let mut params_vec: Vec<&str> = Vec::with_capacity(columns.len());
+            for i in 0..columns.len() {
+                params_vec.push(raw_record.get(i).unwrap_or(""));
+            }
+            let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let _ = stmt.execute(params_refs.as_slice());
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+
+    // Create aliases in main schema
+    if is_multi {
+        let alias_name = format!("{}_{}", schema_name, sanitized_sheet_name);
+        let view_sql = format!("CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM {};", alias_name, target_table);
+        let _ = conn.execute(&view_sql, []);
+
+        if schema_name == sanitized_sheet_name {
+            let direct_view = format!("CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM {};", schema_name, target_table);
+            let _ = conn.execute(&direct_view, []);
+        }
+    } else {
+        let data_view = format!("CREATE VIEW IF NOT EXISTS \"data\" AS SELECT * FROM {};", target_table);
+        let _ = conn.execute(&data_view, []);
+    }
+
+    Ok(())
 }
 
 fn format_cell_value(cell: &Data) -> String {
