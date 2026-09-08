@@ -3,6 +3,10 @@ name = "rtb"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "rtb"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rtb"
 path = "src/main.rs"
