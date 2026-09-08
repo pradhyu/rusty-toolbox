@@ -31,13 +31,14 @@ pub fn execute_hsql_command(
 
     // 3. Direct SQL Query execution
     if let Some(sql) = query {
+        let cleaned_sql = crate::modules::xlsx::clean_sql_query(&sql);
         let conn = sqlite_bridge::SqliteBridge::create_in_memory_from_hsql(&db)
             .map_err(|e| format!("In-memory bridge error: {}", e))?;
 
-        let (cols, rows) = sqlite_bridge::SqliteBridge::query_to_table(&conn, &sql)
+        let (cols, rows) = sqlite_bridge::SqliteBridge::query_to_table(&conn, &cleaned_sql)
             .map_err(|e| format!("Query execution error: {}", e))?;
 
-        println!("{} Executing: {}", "🔍".cyan(), sql.bold().yellow());
+        println!("{} Executing: {}", "🔍".cyan(), cleaned_sql.bold().yellow());
         print_ascii_table(&cols, &rows);
         println!("({} rows returned)", rows.len().to_string().green());
     }

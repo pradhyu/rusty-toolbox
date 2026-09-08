@@ -21,9 +21,10 @@ pub fn execute_xlsx_command(
     }
 
     if let Some(ref q) = query {
-        println!("{} Executing: {}", "🔍".cyan(), q.bright_white().bold());
+        let cleaned_query = clean_sql_query(q);
+        println!("{} Executing: {}", "🔍".cyan(), cleaned_query.bright_white().bold());
         let conn = workbook.create_in_memory_sqlite().map_err(|e| format!("SQLite initialization error: {}", e))?;
-        let (columns, rows) = query_to_table(&conn, q).map_err(|e| format!("Query failed: {}", e))?;
+        let (columns, rows) = query_to_table(&conn, &cleaned_query).map_err(|e| format!("Query failed: {}", e))?;
 
         render_ascii_table(&columns, &rows);
         println!("({} rows returned)\n", rows.len());
@@ -83,4 +84,38 @@ fn render_ascii_table(columns: &[String], rows: &[Vec<String>]) {
     // Bottom border
     let bottom_border: Vec<String> = col_widths.iter().map(|w| "─".repeat(w + 2)).collect();
     println!("└{}┘", bottom_border.join("┴"));
+}
+
+pub fn clean_sql_query(query: &str) -> String {
+    // 1. Remove line continuation backslashes (\ followed by whitespace or newline)
+    let without_escapes = query.replace("\\\n", " ").replace("\\\r\n", " ");
+    
+    // 2. Normalize whitespace while respecting strings
+    let mut cleaned = String::new();
+    let mut in_quote = false;
+    let mut prev_is_space = false;
+
+    for c in without_escapes.chars() {
+        if c == '\'' {
+            in_quote = !in_quote;
+            cleaned.push(c);
+            prev_is_space = false;
+        } else if in_quote {
+            cleaned.push(c);
+        } else if c == '\\' {
+            // Stray backslash outside quotes from copy-pasting shell commands
+            cleaned.push(' ');
+            prev_is_space = true;
+        } else if c.is_whitespace() {
+            if !prev_is_space {
+                cleaned.push(' ');
+                prev_is_space = true;
+            }
+        } else {
+            cleaned.push(c);
+            prev_is_space = false;
+        }
+    }
+
+    cleaned.trim().trim_end_matches(';').to_string()
 }
